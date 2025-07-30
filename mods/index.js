@@ -33,6 +33,7 @@ console.log("\n[Yandex Mod] Source code: https://github.com/Stephanzion/YandexMu
     modStyles.push("/_next/static/yandex_mod/topbar/index.css");
   }
 
+  modScripts.push("https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.7/signalr.min.js");
   modScripts.push("/_next/static/yandex_mod/tuna/index.js");
   modScripts.push("/_next/static/yandex_mod/experiments/index.js");
 

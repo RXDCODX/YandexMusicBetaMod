@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Tuna browser script
+// @name         Tuna SignalR Client
 // @namespace    univrsal
-// @version      1.0.29
-// @description  Get song information from web players
+// @version      1.3.0
+// @description  Send music player data to SignalR Hub
 // @author       univrsal
 // @match        *://open.spotify.com/*
 // @match        *://soundcloud.com/*
@@ -13,225 +13,378 @@
 // @match        *://*.youtube.com/*
 // @match        *://app.plex.tv/*
 // @grant        unsafeWindow
+// @require      https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.7/signalr.min.js
 // @license      GPLv2
 // ==/UserScript==
 
 (function () {
-    'use strict';
-    console.log("Loading tuna browser script");
+  "use strict";
+  console.log("[Tuna] Loading Tuna SignalR Client");
 
-    // Configuration
-    const config = {
-        port: 1608,
-        secondaryPort: 9255,
-        refreshRateMs: 1000,
-        cooldownMs: 10000,
-        maxFailures: 3
-    };
+  // Configuration
+  const config = {
+    devHubUrl: "http://localhost:9255/tuna",
+    prodHubUrl: "http://localhost:9155/tuna",
+    refreshRateMs: 1000,
+    initialReconnectDelay: 1000,
+    maxReconnectDelay: 30000,
+    reconnectBackoffFactor: 1.5,
+  };
 
-    // State management
-    const state = {
-        failureCount: 0,
-        cooldown: 0,
-        lastState: {},
-        lastUpdate: 0,
-        requestQueue: [],
-        isSending: false
-    };
+  // Current state
+  const playerState = {
+    lastSentState: null,
+    prodConnection: null,
+    devConnection: null,
+    prodIsConnected: false,
+    devIsConnected: false,
+    isInitialized: false,
+    prodReconnectAttempts: 0,
+    devReconnectAttempts: 0,
+    prodReconnectTimer: null,
+    devReconnectTimer: null,
+  };
 
-    // Request queue processor
-    async function processQueue() {
-        if (state.isSending || state.requestQueue.length === 0) return;
-        
-        state.isSending = true;
-        const request = state.requestQueue.shift();
-        
-        try {
-            await sendRequest(request.url, request.data);
-            state.lastUpdate = Date.now();
-            state.failureCount = 0;
-        } catch (error) {
-            console.error('Request failed:', error);
-            state.failureCount++;
-            if (state.failureCount >= config.maxFailures) {
-                state.cooldown = config.cooldownMs;
-                state.failureCount = 0;
-                console.log('Entering cooldown due to multiple failures');
-            }
-        } finally {
-            state.isSending = false;
-            processQueue();
-        }
+  // Initialize SignalR connections
+  async function initSignalR() {
+    if (playerState.isInitialized) {
+      console.log("[Tuna] SignalR already initialized");
+      return;
     }
 
-    // Improved request function with timeout
-    function sendRequest(url, data) {
-        return new Promise((resolve, reject) => {
-            const xhr = new XMLHttpRequest();
-            xhr.timeout = 5000; // 5 second timeout
-            
-            xhr.open('POST', url, true);
-            xhr.setRequestHeader('Accept', 'application/json');
-            xhr.setRequestHeader('Content-Type', 'application/json');
-            
-            xhr.onload = function() {
-                if (xhr.status >= 200 && xhr.status < 300) {
-                    resolve(xhr.response);
-                } else {
-                    reject(new Error(`HTTP ${xhr.status}: ${xhr.statusText}`));
-                }
-            };
-            
-            xhr.onerror = function() {
-                reject(new Error('Network error'));
-            };
-            
-            xhr.ontimeout = function() {
-                reject(new Error('Request timeout'));
-            };
-            
-            xhr.send(JSON.stringify(data));
-        });
+    console.log("[Tuna] Initializing SignalR connections...");
+
+    // Create production connection
+    playerState.prodConnection = new signalR.HubConnectionBuilder()
+      .withUrl(config.prodHubUrl, {
+        skipNegotiation: true, // skipNegotiation as we specify WebSockets
+        transport: signalR.HttpTransportType.WebSockets, // force WebSocket transport
+      })
+      .withAutomaticReconnect() // Disable default retry policy
+      .configureLogging(signalR.LogLevel.Warning)
+      .build();
+
+    // Create development connection
+    playerState.devConnection = new signalR.HubConnectionBuilder()
+      .withUrl(config.devHubUrl, {
+        skipNegotiation: true, // skipNegotiation as we specify WebSockets
+        transport: signalR.HttpTransportType.WebSockets, // force WebSocket transport
+      })
+      .withAutomaticReconnect() // Disable default retry policy
+      .configureLogging(signalR.LogLevel.Debug)
+      .build();
+
+    // Setup production connection events
+    setupConnectionEvents(playerState.prodConnection, "prod");
+    // Setup development connection events
+    setupConnectionEvents(playerState.devConnection, "dev");
+
+    // Start connections
+    console.log("[Tuna] Starting connections...");
+    try {
+      await startConnection(playerState.devConnection, "dev");
+    } catch (err) {
+      console.error(err);
+    }
+    try {
+      await startConnection(playerState.prodConnection, "prod");
+    } catch (err) {
+      console.error(err);
     }
 
-    // Debounced post function with queue
-    function post(data) {
-        if (data.status && data.status !== "playing" && state.lastState.status === data.status) {
-            return;
-        }
-        
-        state.lastState = data;
-        
-        const postData = {
-            data,
-            hostname: window.location.hostname,
-            date: Date.now()
-        };
-        
-        // Add requests to queue
-        state.requestQueue.push({
-            url: `http://localhost:${config.port}/`,
-            data: postData
-        });
-        
-        state.requestQueue.push({
-            url: `http://localhost:${config.secondaryPort}/`,
-            data: postData
-        });
-        
-        processQueue();
-    }
+    playerState.isInitialized = true;
+    console.log("[Tuna] SignalR connections initialized");
+  }
 
-    // Query helper with error handling
-    function query(target, fun, alt = null) {
-        try {
-            const element = document.evaluate(
-                target, 
-                document, 
-                null, 
-                XPathResult.FIRST_ORDERED_NODE_TYPE, 
-                null
-            ).singleNodeValue;
-            
-            return element ? fun(element) : alt;
-        } catch (error) {
-            console.error('Query error:', error);
-            return alt;
-        }
-    }
+  function setupConnectionEvents(connection, type) {
+    connection.onclose(async (error) => {
+      if (type === "prod") {
+        playerState.prodIsConnected = false;
+      } else {
+        playerState.devIsConnected = false;
+      }
+      console.log(
+        `[Tuna] ${
+          type === "prod" ? "Production" : "Development"
+        }: Connection closed`,
+        error ? `Error: ${error.message}` : "",
+      );
 
-    function timestampToMs(ts) {
-        if (!ts) return 0;
-        
-        const splits = ts.split(':').map(Number);
-        if (splits.length === 2) {
-            return splits[0] * 60000 + splits[1] * 1000;
-        } else if (splits.length === 3) {
-            return splits[0] * 3600000 + splits[1] * 60000 + splits[2] * 1000;
-        }
-        return 0;
-    }
+      // Schedule reconnection
+      scheduleReconnect(connection, type);
+    });
 
-    // Throttled and improved data collection
-    function collectData() {
-        if (state.cooldown > 0) {
-            state.cooldown -= config.refreshRateMs;
-            return;
-        }
+    connection.onreconnecting((error) => {
+      if (type === "prod") {
+        playerState.prodIsConnected = false;
+      } else {
+        playerState.devIsConnected = false;
+      }
+      console.log(
+        `[Tuna] ${
+          type === "prod" ? "Production" : "Development"
+        }: Connection lost, reconnecting...`,
+        error.message,
+      );
+    });
 
-        try {
-            const now = Date.now();
-            if (now - state.lastUpdate < config.refreshRateMs) {
-                return;
-            }
+    connection.onreconnected((connectionId) => {
+      if (type === "prod") {
+        playerState.prodIsConnected = true;
+        playerState.prodReconnectAttempts = 0;
+      } else {
+        playerState.devIsConnected = true;
+        playerState.devReconnectAttempts = 0;
+      }
+      console.log(
+        `[Tuna] ${
+          type === "prod" ? "Production" : "Development"
+        }: Connection reestablished. Connection ID: ${connectionId}`,
+      );
+    });
+  }
 
-            const status = query(
-                '/html/body/div[3]/div/div/section/div[2]/div[1]/div/button[2]', 
-                e => e.getAttribute('data-test-id') === "PAUSE_BUTTON" ? "playing" : "stopped", 
-                'unknown'
-            );
+  function scheduleReconnect(connection, type) {
+    const attempts =
+      type === "prod"
+        ? ++playerState.prodReconnectAttempts
+        : ++playerState.devReconnectAttempts;
 
-            const cover = query(
-                '/html/body/div[3]/div/div/section/div[1]/div[1]/div[1]/img', 
-                e => e.srcset ? e.srcset.split(',').pop().trim().split(/\s+/)[0] : e.src
-            );
+    // Calculate delay with exponential backoff
+    const delay = Math.min(
+      config.initialReconnectDelay *
+        Math.pow(config.reconnectBackoffFactor, attempts - 1),
+      config.maxReconnectDelay,
+    );
 
-            const title = query(
-                '/html/body/div[3]/div/div/section/div[1]/div[1]/div[2]/div/div/div[2]/a/span', 
-                e => e.textContent.trim()
-            );
+    console.log(
+      `[Tuna] ${
+        type === "prod" ? "Production" : "Development"
+      }: Scheduling reconnect attempt ${attempts} in ${delay}ms`,
+    );
 
-            if (!title) return;
+    const timer = setTimeout(async () => {
+      try {
+        await startConnection(connection, type);
+      } catch (error) {
+        console.error(
+          `[Tuna] ${
+            type === "prod" ? "Production" : "Development"
+          }: Reconnect failed:`,
+          error,
+        );
+        scheduleReconnect(connection, type); // Continue trying
+      }
+    }, delay);
 
-            const artists = [
-                query(
-                    '/html/body/div[3]/div/div/section/div[1]/div[1]/div[2]/div/div/div[2]', 
-                    e => e.textContent.trim()
-                )
-            ].filter(Boolean);
-
-            const progress = query(
-                '/html/body/div[3]/div/div/section/div[2]/div[2]/span[1]', 
-                e => timestampToMs(e.textContent)
-            );
-
-            const duration = query(
-                '/html/body/div[3]/div/div/section/div[2]/div[2]/span[2]', 
-                e => timestampToMs(e.textContent)
-            );
-
-            post({ 
-                cover, 
-                title, 
-                artists, 
-                status, 
-                progress: progress || 0, 
-                duration: duration || 0, 
-                album_url: "" 
-            });
-
-        } catch (error) {
-            console.error('Data collection error:', error);
-        }
-    }
-
-    // Initialize with proper timing
-    let isInitialized = false;
-    function initialize() {
-        if (isInitialized) return;
-        
-        // Start with a small delay to let page load
-        setTimeout(() => {
-            setInterval(collectData, config.refreshRateMs);
-            isInitialized = true;
-            console.log('Tuna script initialized');
-        }, 2000);
-    }
-
-    // Start when DOM is ready
-    if (document.readyState === 'complete') {
-        initialize();
+    if (type === "prod") {
+      clearTimeout(playerState.prodReconnectTimer);
+      playerState.prodReconnectTimer = timer;
     } else {
-        window.addEventListener('load', initialize);
+      clearTimeout(playerState.devReconnectTimer);
+      playerState.devReconnectTimer = timer;
     }
+  }
+
+  async function startConnection(connection, type) {
+    try {
+      await connection.start();
+      if (type === "prod") {
+        playerState.prodIsConnected = true;
+        playerState.prodReconnectAttempts = 0;
+      } else {
+        playerState.devIsConnected = true;
+        playerState.devReconnectAttempts = 0;
+      }
+      console.log(
+        `[Tuna] ${
+          type === "prod" ? "Production" : "Development"
+        }: Connection started successfully`,
+      );
+      return true;
+    } catch (err) {
+      console.error(
+        `[Tuna] ${
+          type === "prod" ? "Production" : "Development"
+        }: Connection start failed:`,
+        err,
+      );
+      if (type === "prod") {
+        playerState.prodIsConnected = false;
+      } else {
+        playerState.devIsConnected = false;
+      }
+      throw err;
+    }
+  }
+
+  // Send data to Hub
+  async function sendPlayerData(data) {
+    try {
+      const simplifiedState = {
+        cover: data.cover,
+        title: data.title,
+        artists: data.artists,
+        status: data.status,
+        progress: data.progress,
+        duration: data.duration,
+        album_url: data.album_url,
+      };
+
+      // Skip if state hasn't changed
+      if (
+        playerState.lastSentState &&
+        JSON.stringify(playerState.lastSentState) ===
+          JSON.stringify(simplifiedState)
+      ) {
+        return;
+      }
+
+      const payload = {
+        data,
+        hostname: window.location.hostname,
+        timestamp: new Date().toISOString(),
+      };
+
+      // Send to production hub if connected
+      if (playerState.prodIsConnected) {
+        try {
+          await playerState.prodConnection.invoke("SendPlayerData", payload);
+          console.debug("[Tuna] Data sent to production hub:", simplifiedState);
+        } catch (err) {
+          console.error("[Tuna] Error sending to production hub:", err);
+          playerState.prodIsConnected = false;
+        }
+      } else {
+        console.log("[Tuna] Not connected to production hub, skipping send");
+      }
+
+      // Send to development hub if connected
+      if (playerState.devIsConnected) {
+        try {
+          await playerState.devConnection.invoke("SendPlayerData", payload);
+          console.debug(
+            "[Tuna] Data sent to development hub:",
+            simplifiedState,
+          );
+        } catch (err) {
+          console.error("[Tuna] Error sending to development hub:", err);
+          playerState.devIsConnected = false;
+        }
+      } else {
+        console.log("[Tuna] Not connected to development hub, skipping send");
+      }
+
+      playerState.lastSentState = simplifiedState;
+    } catch (err) {
+      console.error("[Tuna] Error in sendPlayerData:", err);
+    }
+  }
+
+  // Helper function to convert time string to milliseconds
+  function timeToMs(timeStr) {
+    if (!timeStr) return 0;
+    const [minutes, seconds] = timeStr.split(":").map(Number);
+    return (minutes * 60 + seconds) * 1000;
+  }
+
+  // Collect player data - MODIFIED VERSION USING SELECTORS FROM SECOND SCRIPT
+  function collectPlayerData() {
+    try {
+      const player =
+        document.querySelector('section[data-test-id="PLAYERBAR_DESKTOP"]') ||
+        document.querySelector('section[class*="PlayerBarMobile_root__"]');
+
+      if (!player) {
+        console.debug("[Tuna] Player element not found");
+        return;
+      }
+
+      // Get track info
+      const titleElement =
+        player.querySelector('a[data-test-id="TRACK_TITLE"]') ||
+        player.querySelector('span[class*="Meta_title__"]');
+      const title = titleElement?.textContent.trim();
+
+      if (!title) return;
+
+      // Get artists
+      const artistsElement =
+        player.querySelector('span[class*="Meta_albumTitle__"]') ||
+        player.querySelectorAll('a[data-test-id="SEPARATED_ARTIST_TITLE"]');
+      let artists = [];
+
+      if (artistsElement instanceof NodeList) {
+        artists = Array.from(artistsElement).map((el) => el.textContent.trim());
+      } else if (artistsElement) {
+        artists = [artistsElement.textContent.trim()];
+      }
+
+      // Get cover image
+      const imageElement =
+        player.querySelector('img[data-test-id="ENTITY_COVER"]') ||
+        player.querySelector('img[data-test-id="ENTITY_COVER_IMAGE"]');
+      const cover = imageElement?.src;
+
+      // Get timestamps
+      const timerStart = player
+        .querySelector('span[data-test-id="TIMECODE_TIME_START"]')
+        ?.textContent.trim();
+      const timerEnd = player
+        .querySelector('span[data-test-id="TIMECODE_TIME_END"]')
+        ?.textContent.trim();
+
+      // Calculate progress and duration
+      const progress = timerStart ? timeToMs(timerStart) : 0;
+      const duration = timerStart && timerEnd ? timeToMs(timerEnd) : 0;
+
+      // Get track ID and album URL
+      const idElement =
+        player.querySelector('a[data-test-id="TRACK_TITLE"]') ||
+        player.querySelector("a[class*=Meta_link__]");
+      const trackId = idElement?.href?.trim()?.split("=")?.pop();
+      const album_url = trackId
+        ? `https://music.yandex.ru/album/${trackId}`
+        : "";
+
+      // Get player status
+      const status = player.querySelector('button[data-test-id="PAUSE_BUTTON"]')
+        ? "playing"
+        : "stopped";
+
+      sendPlayerData({
+        cover,
+        title,
+        artists,
+        status,
+        progress,
+        duration,
+        album_url,
+      });
+    } catch (error) {
+      console.error("[Tuna] Data collection error:", error);
+    }
+  }
+
+  // Main initialization
+  async function initialize() {
+    // Load SignalR
+    if (typeof signalR === "undefined") {
+      console.error("[Tuna] SignalR not loaded!");
+      return;
+    }
+
+    await initSignalR();
+
+    // Start data collection
+    setInterval(collectPlayerData, config.refreshRateMs);
+    console.log("[Tuna] Tuna SignalR client initialized");
+  }
+
+  // Start when DOM is ready
+  if (document.readyState === "complete") {
+    initialize();
+  } else {
+    window.addEventListener("load", initialize);
+  }
 })();
