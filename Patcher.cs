@@ -176,7 +176,7 @@ namespace YandexMusicPatcherGui
             Onlog?.Invoke("Patcher", $"Получаю последний билд Музыки...");
 
             var webClient = new WebClient();
-            var lastestUrl = $"{musicS3}/stable/Yandex_Music_x64_5.58.0.exe";
+            var lastestUrl = $"{musicS3}/stable/Yandex_Music_x64_5.56.0.exe";
 
             Onlog?.Invoke("Patcher", $"Ссылка получена, скачиваю Музыку...");
 
