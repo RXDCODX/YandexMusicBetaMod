@@ -3,8 +3,8 @@ console.log("[Tuna] Loading Tuna SignalR Client");
 
 // Configuration
 const config = {
-  devHubUrl: "http://localhost:9255/tuna",
-  prodHubUrl: "http://localhost:9155/tuna",
+  devHubUrl: "http://localhost:9255/hubs/tuna",
+  prodHubUrl: "http://localhost:9155/hubs/tuna",
   refreshRateMs: 1000,
   initialReconnectDelay: 1000,
   maxReconnectDelay: 30000,
